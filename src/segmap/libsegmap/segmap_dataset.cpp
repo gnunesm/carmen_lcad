@@ -556,7 +556,7 @@ DatasetKitti::load_image(int i)
 
 
 void
-DatasetKitti::load_pointcloud(int i, PointCloud<PointXYZRGB>::Ptr cloud, double v, double phi)
+DatasetKitti::load_pointcloud(int i, PointCloud<PointXYZRGB>::Ptr cloud, double v __attribute__((unused)), double phi __attribute__((unused)))
 {
 	// pointers
 	static int num;
@@ -699,11 +699,10 @@ DatasetKitti::load_data()
 
 NewCarmenDataset::NewCarmenDataset(std::string path,
                                    std::string odom_calib_path,
+																	 std::string fused_odom_path,
                                    int sync_type,
                                    std::string intensity_calib_path)
 {
-	printf("Loading log '%s'\n", path.c_str());
-	_fptr = safe_fopen(path.c_str(), "r");
 	_sync_type = sync_type;
 
 	_velodyne_dir = string(path) + "_velodyne";
@@ -713,7 +712,12 @@ NewCarmenDataset::NewCarmenDataset(std::string path,
 
 	_load_intensity_calibration(intensity_calib_path);
 	_load_odometry_calibration(odom_calib_path);
-	_load_log();
+
+	// reading the log requires odom calibration data.
+	_load_log(path);
+
+	_load_poses(fused_odom_path, &_fused_odom);
+	_update_data_with_poses();
 }
 
 
@@ -723,8 +727,6 @@ NewCarmenDataset::~NewCarmenDataset()
 
 	for (int i = 0; i < _data.size(); i++)
 		delete(_data[i]);
-
-	fclose(_fptr);
 }
 
 
@@ -828,14 +830,18 @@ NewCarmenDataset::vel2car()
 
 
 void
-NewCarmenDataset::_load_log()
+NewCarmenDataset::_load_log(std::string &path)
 {
+	printf("Loading log '%s'\n", path.c_str());
+	FILE *fptr = safe_fopen(path.c_str(), "r");
+
 	DataSample *sample;
 
-	while ((sample = _next_data_package()))
+	while ((sample = _next_data_package(fptr)))
 		_data.push_back(sample);
 
 	_clear_synchronization_queues();
+	fclose(fptr);
 }
 
 
@@ -843,29 +849,32 @@ void
 NewCarmenDataset::_load_odometry_calibration(std::string &path)
 {
 	printf("Loading odometry calibration '%s'\n", path.c_str());
-	vector<char*> splitted = string_split(path.c_str(), "/");
-	//string odom_calib = "/dados/data2/data_" + string(splitted[splitted.size() - 1]) + "/odom_calib.txt";
-	string odom_calib = path;
 
-	FILE *f = fopen(odom_calib.c_str(), "r");
+	int success = false;
 
-	if (f != NULL)
+	if (path.size() > 0)
 	{
-		int n = fscanf(f, "bias v: %lf %lf bias phi: %lf %lf Initial Angle: %lf",
-		               &_calib.mult_v,
-		               &_calib.add_v,
-		               &_calib.mult_phi,
-		               &_calib.add_phi,
-		               &_calib.init_angle);
+		FILE *f = fopen(path.c_str(), "r");
 
-		if (n != 5)
-			exit(printf("Failed to read odometry calibration data from file '%s'.\n", odom_calib.c_str()));
+		if (f != NULL)
+		{
+			int n = fscanf(f, "bias v: %lf %lf bias phi: %lf %lf Initial Angle: %lf",
+										 &_calib.mult_v,
+										 &_calib.add_v,
+										 &_calib.mult_phi,
+										 &_calib.add_phi,
+										 &_calib.init_angle);
 
-		fclose(f);
+			if (n == 5)
+				success = true;
+
+			fclose(f);
+		}
 	}
-	else
+
+	if (!success)
 	{
-		printf("Warning: odometry calibration file not found. Assuming default values.\n");
+		fprintf(stderr, "Warning: fail to load odometry calibration from '%s'. Assuming default values.\n", path.c_str());
 
 		_calib.mult_phi = _calib.mult_v = 1.0;
 		_calib.add_phi = _calib.add_v = 0.;
@@ -873,7 +882,66 @@ NewCarmenDataset::_load_odometry_calibration(std::string &path)
 	}
 
 	printf("Odom calibration: bias v: %lf %lf bias phi: %lf %lf\n", 
-	       _calib.mult_v, _calib.add_v, _calib.mult_phi, _calib.add_phi);
+				 _calib.mult_v, _calib.add_v, _calib.mult_phi, _calib.add_phi);
+}
+
+
+void
+NewCarmenDataset::_load_poses(std::string &path, std::vector<Pose2d> *poses)
+{
+	bool success = false;
+	char dummy[64];
+
+	printf("Loading poses from '%s'\n", path.c_str());
+
+	if (path.size() > 0)
+	{
+		FILE *f = fopen(path.c_str(), "r");
+
+		if (f != NULL)
+		{
+			while (!feof(f))
+			{
+				Pose2d pose;
+
+				fscanf(f, "\n%s %lf %lf %lf %s %s %s\n",
+							 dummy, &pose.x, &pose.y, &pose.th,
+							 dummy, dummy, dummy);
+
+				//printf("%lf %lf %lf\n", pose.x, pose.y, pose.th);
+				poses->push_back(pose);
+			}
+
+			if (poses->size() == size())
+				success = 1;
+			else
+				fprintf(stderr, "Warning: number of poses %ld is different from log size %d\n",
+								poses->size(), size());
+
+			fclose(f);
+		}
+		else
+		{
+			fprintf(stderr, "Warning: failed to open file '%s'\n", path.c_str());
+		}
+	}
+
+	if (!success)
+	{
+		fprintf(stderr, "Warning: failed to load poses from '%s'. Returning default values.\n", path.c_str());
+		poses->clear();
+	}
+}
+
+
+void
+NewCarmenDataset::_update_data_with_poses()
+{
+	for (int i = 0; i < size(); i++)
+	{
+		if (i < _fused_odom.size()) at(i)->pose = _fused_odom[i];
+		else at(i)->pose = Pose2d(0, 0, 0);
+	}
 }
 
 
@@ -887,7 +955,13 @@ NewCarmenDataset::_allocate_calibration_table()
 		table[i] = (unsigned char **) calloc(10, sizeof(unsigned char *));
 
 		for (int j = 0; j < 10; j++)
+		{
 			table[i][j] = (unsigned char *) calloc(256, sizeof(unsigned char));
+
+			// assign default values.
+			for (int k = 0; k < 256; k++)
+				table[i][j][k] = (unsigned char) k;
+		}
 	}
 
 	return table;
@@ -913,7 +987,13 @@ void
 NewCarmenDataset::_load_intensity_calibration(std::string &path)
 {
 	printf("Loading intensity calibration '%s'\n", path.c_str());
-	FILE *calibration_file_bin = safe_fopen(path.c_str(), "r");
+	FILE *calibration_file_bin = fopen(path.c_str(), "r");
+
+	if (calibration_file_bin == NULL)
+	{
+		fprintf(stderr, "Warning: failed to read intensity calibration file '%s'. Using uncalibrated values.\n", path.c_str());
+		return;
+	}
 
 	int laser, ray_size, intensity;
 	long accumulated_intennsity, count;
@@ -954,24 +1034,9 @@ NewCarmenDataset::_load_intensity_calibration(std::string &path)
 }
 
 
-void
-NewCarmenDataset::_free_queue(vector<char*> queue)
-{
-	for (int i = 0; i < queue.size(); i++)
-		free(queue[i]);
-}
-
-
 void 
 NewCarmenDataset::_clear_synchronization_queues()
 {
-	_free_queue(_imu_messages);
-	_free_queue(_gps_position_messages);
-	_free_queue(_gps_orientation_messages);
-	_free_queue(_odom_messages);
-	_free_queue(_camera_messages);
-	_free_queue(_velodyne_messages);
-
 	_imu_messages.clear();
 	_gps_position_messages.clear();
 	_gps_orientation_messages.clear();
@@ -982,45 +1047,47 @@ NewCarmenDataset::_clear_synchronization_queues()
 
 
 void 
-NewCarmenDataset::_add_message_to_queue(char *line)
+NewCarmenDataset::_add_message_to_queue(string line)
 {
 	// ignore small lines
-	if (strlen(line) > 10)
+	if (line.size() > 10)
 	{
-		if (!strncmp("NMEAGGA", line, strlen("NMEAGGA")) && line[strlen("NMEAGGA") + 1] == '1')
-			_gps_position_messages.push_back(string_copy(line));
-		else if (!strncmp("NMEAHDT", line, strlen("NMEAHDT")))
-			_gps_orientation_messages.push_back(string_copy(line));
-		else if (!strncmp("ROBOTVELOCITY_ACK", line, strlen("ROBOTVELOCITY_ACK")))
-			_odom_messages.push_back(string_copy(line));
-		else if (!strncmp("XSENS_QUAT", line, strlen("XSENS_QUAT")))
-			_imu_messages.push_back(string_copy(line));
-		else if (!strncmp("BUMBLEBEE_BASIC_STEREOIMAGE_IN_FILE3", line, strlen("BUMBLEBEE_BASIC_STEREOIMAGE_IN_FILE3")))
-			_camera_messages.push_back(string_copy(line));
-		else if (!strncmp("VELODYNE_PARTIAL_SCAN_IN_FILE", line, strlen("VELODYNE_PARTIAL_SCAN_IN_FILE")))
-			_velodyne_messages.push_back(string_copy(line));
+		const char *cline = line.c_str();
+
+		if (!strncmp("NMEAGGA", cline, strlen("NMEAGGA")) && cline[strlen("NMEAGGA") + 1] == '1')
+			_gps_position_messages.push_back(cline);
+		else if (!strncmp("NMEAHDT", cline, strlen("NMEAHDT")))
+			_gps_orientation_messages.push_back(cline);
+		else if (!strncmp("ROBOTVELOCITY_ACK", cline, strlen("ROBOTVELOCITY_ACK")))
+			_odom_messages.push_back(cline);
+		else if (!strncmp("XSENS_QUAT", cline, strlen("XSENS_QUAT")))
+			_imu_messages.push_back(cline);
+		else if (!strncmp("BUMBLEBEE_BASIC_STEREOIMAGE_IN_FILE3", cline, strlen("BUMBLEBEE_BASIC_STEREOIMAGE_IN_FILE3")))
+			_camera_messages.push_back(cline);
+		else if (!strncmp("VELODYNE_PARTIAL_SCAN_IN_FILE", cline, strlen("VELODYNE_PARTIAL_SCAN_IN_FILE")))
+			_velodyne_messages.push_back(cline);
 	}
 }
 
 
-vector<char*> 
-NewCarmenDataset::_find_nearest(vector<char*> &queue, double ref_time)
+vector<string>
+NewCarmenDataset::_find_nearest(vector<string> &queue, double ref_time)
 {
 	double msg_time, nearest_time;
-	vector<char*> splitted;
-	vector<char*> most_sync;
+	vector<string> splitted;
+	vector<string> most_sync;
 
 	nearest_time = 0;
 
 	for (int i = 0; i < queue.size(); i++)
 	{
 		splitted = string_split(queue[i], " ");
-		msg_time = atof(splitted[splitted.size() - 3]);
+		msg_time = atof(splitted[splitted.size() - 3].c_str());
 
 		if (fabs(msg_time - ref_time) < fabs(nearest_time - ref_time))
 		{
 			nearest_time = msg_time;
-			most_sync = vector<char*>(splitted);
+			most_sync = vector<string>(splitted);
 		}
 	}
 
@@ -1029,32 +1096,32 @@ NewCarmenDataset::_find_nearest(vector<char*> &queue, double ref_time)
 
 
 void 
-NewCarmenDataset::_parse_odom(vector<char*> data, DataSample *sample)
+NewCarmenDataset::_parse_odom(vector<string> data, DataSample *sample)
 {
-	sample->v = atof(data[1]);
-	sample->phi = atof(data[2]);
-	sample->odom_time = atof(data[3]);
+	sample->v = atof(data[1].c_str());
+	sample->phi = atof(data[2].c_str());
+	sample->odom_time = atof(data[3].c_str());
 }
 
 
 void 
-NewCarmenDataset::_parse_imu(vector<char*> data, DataSample *sample)
+NewCarmenDataset::_parse_imu(vector<string> data, DataSample *sample)
 {
 	sample->xsens = Quaterniond(
-			atof(data[4]),
-			atof(data[5]),
-			atof(data[6]),
-			atof(data[7])
+			atof(data[4].c_str()),
+			atof(data[5].c_str()),
+			atof(data[6].c_str()),
+			atof(data[7].c_str())
 	);
 
-	sample->xsens_time = atof(data[data.size() - 3]);
+	sample->xsens_time = atof(data[data.size() - 3].c_str());
 }
 
 
 void
-NewCarmenDataset::_parse_velodyne(vector<char*> data, DataSample *sample, string velodyne_path)
+NewCarmenDataset::_parse_velodyne(vector<string> data, DataSample *sample, string velodyne_path)
 {
-	vector<char*> splitted = string_split(data[1], "/");
+	vector<string> splitted = string_split(data[1], "/");
 
 	int n = splitted.size();
 	string path = velodyne_path + "/" + 
@@ -1062,16 +1129,16 @@ NewCarmenDataset::_parse_velodyne(vector<char*> data, DataSample *sample, string
 			splitted[n - 2] + "/" +
 			splitted[n - 1];
 
-	sample->n_laser_shots = atoi(data[2]);
+	sample->n_laser_shots = atoi(data[2].c_str());
 	sample->velodyne_path = path;
-	sample->velodyne_time =  atof(data[data.size() - 3]);
+	sample->velodyne_time =  atof(data[data.size() - 3].c_str());
 }
 
 
 void 
-NewCarmenDataset::_parse_camera(vector<char*> data, DataSample *sample, string image_path)
+NewCarmenDataset::_parse_camera(vector<string> data, DataSample *sample, string image_path)
 {
-	vector<char*> splitted = string_split(data[1], "/");
+	vector<string> splitted = string_split(data[1], "/");
 
 	int n = splitted.size();
 	string path = image_path + "/" + 
@@ -1080,24 +1147,24 @@ NewCarmenDataset::_parse_camera(vector<char*> data, DataSample *sample, string i
 			splitted[n - 1];
 
 	sample->image_path = path;
-	sample->image_height = atoi(data[2]);
-	sample->image_width = atoi(data[3]);
-	sample->image_time = atof(data[data.size() - 3]);
+	sample->image_height = atoi(data[3].c_str());
+	sample->image_width = atoi(data[2].c_str());
+	sample->image_time = atof(data[data.size() - 3].c_str());
 }
 
 
 void 
-NewCarmenDataset::_parse_gps_position(vector<char*> data, DataSample *sample)
+NewCarmenDataset::_parse_gps_position(vector<string> data, DataSample *sample)
 {
-	double lt = carmen_global_convert_degmin_to_double(atof(data[3]));
-	double lg = carmen_global_convert_degmin_to_double(atof(data[5]));
+	double lt = carmen_global_convert_degmin_to_double(atof(data[3].c_str()));
+	double lg = carmen_global_convert_degmin_to_double(atof(data[5].c_str()));
 
 	// verify the latitude and longitude orientations
 	if ('S' == data[4][0]) lt = -lt;
 	if ('W' == data[6][0]) lg = -lg;
 
 	// convert to x and y coordinates
-	Gdc_Coord_3d gdc = Gdc_Coord_3d(lt, lg, atof(data[10]));
+	Gdc_Coord_3d gdc = Gdc_Coord_3d(lt, lg, atof(data[10].c_str()));
 
 	// Transformando o z utilizando como altitude a altitude mesmo - que esta vindo como zero
 	Utm_Coord_3d utm;
@@ -1107,35 +1174,37 @@ NewCarmenDataset::_parse_gps_position(vector<char*> data, DataSample *sample)
 	sample->gps.x = utm.y;
 	sample->gps.y = -utm.x;
 
-	sample->gps_quality = atoi(data[7]);
-	sample->gps_time = atof(data[data.size() - 3]);
+	sample->gps_quality = atoi(data[7].c_str());
+	sample->gps_time = atof(data[data.size() - 3].c_str());
 }
 
 
 void 
-NewCarmenDataset::_parse_gps_orientation(vector<char*> data, DataSample *sample)
+NewCarmenDataset::_parse_gps_orientation(vector<string> data, DataSample *sample)
 {
-	sample->gps.th = atof(data[2]);
-	sample->gps_orientation_quality = atoi(data[3]);
+	sample->gps.th = atof(data[2].c_str());
+	sample->gps_orientation_quality = atoi(data[3].c_str());
 }
 
 
 DataSample*
-NewCarmenDataset::_next_data_package()
+NewCarmenDataset::_next_data_package(FILE *fptr)
 {
 	int all_sensors_were_received;
-	static char _line[_MAX_LINE_LENGTH];
+	static char line[_MAX_LINE_LENGTH];
 
 	_clear_synchronization_queues();
 	all_sensors_were_received = 0;
 
 	while (!all_sensors_were_received)
 	{
-		if (feof(_fptr))
+		if (feof(fptr))
 			break;
 
-		fscanf(_fptr, "\n%[^\n]\n", _line);
-		_add_message_to_queue(_line);
+		fscanf(fptr, "\n%[^\n]\n", line);
+
+		string copy_as_string = string(line);
+		_add_message_to_queue(copy_as_string);
 
 		if ((_velodyne_messages.size() > 0) && (_imu_messages.size() > 0) &&
 				(_odom_messages.size() > 0) && (_gps_position_messages.size() > 0) &&
@@ -1161,7 +1230,7 @@ NewCarmenDataset::_assemble_data_package_from_queues()
 {
 	int time_field;
 	double ref_time;
-	vector<char*> msg_splitted;
+	vector<string> msg_splitted;
 	DataSample *sample = new DataSample;
 
 	if (_sync_type == SYNC_BY_CAMERA)
@@ -1172,7 +1241,7 @@ NewCarmenDataset::_assemble_data_package_from_queues()
 		exit(printf("Error: invalid sync type: '%d'\n", _sync_type));
 
 	time_field = msg_splitted.size() - 3;
-	ref_time = atof(msg_splitted[time_field]);
+	ref_time = atof(msg_splitted[time_field].c_str());
 
 	_parse_velodyne(_find_nearest(_velodyne_messages, ref_time), sample, _velodyne_dir);
 	_parse_odom(_find_nearest(_odom_messages, ref_time), sample);

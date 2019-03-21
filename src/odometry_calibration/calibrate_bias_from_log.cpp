@@ -383,7 +383,7 @@ main(int argc, char **argv)
 	srand(rand());
 
 	ParticleSwarmOptimization optimizer(
-		fitness, limits, 5, &DataReadFromFile, 1000, 200);
+		fitness, limits, 5, &DataReadFromFile, 100, 100);
 
 	optimizer.Optimize();
 
