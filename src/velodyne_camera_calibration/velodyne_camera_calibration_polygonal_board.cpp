@@ -4,7 +4,15 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <pcl/visualization/pcl_visualizer.h>
 #include <pcl/io/ply_io.h>
- #include <pcl/visualization/cloud_viewer.h>
+#include <pcl/visualization/cloud_viewer.h>
+#include <pcl/ModelCoefficients.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/point_types.h>
+#include <pcl/sample_consensus/method_types.h>
+#include <pcl/sample_consensus/model_types.h>
+#include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/extract_indices.h>
 
 #include "velodyne_camera_calibration.h"
 
@@ -12,6 +20,8 @@ using namespace std;
 using namespace pcl;
 
 int bumblebee_received = 0;
+
+int number  = 0;
 
 int camera_number;
 
@@ -163,19 +173,19 @@ bumblebee_basic_image_handler(carmen_bumblebee_basic_stereoimage_message *bumble
 void
 velodyne_partial_scan_message_handler(carmen_velodyne_partial_scan_message *velodyne_message)
 {
-    carmen_velodyne_camera_calibration_arrange_velodyne_vertical_angles_to_true_position(velodyne_message);
-	show_velodyne(velodyne_message);
+    // carmen_velodyne_camera_calibration_arrange_velodyne_vertical_angles_to_true_position(velodyne_message);
+	// show_velodyne(velodyne_message);
 
     double h_angle, v_angle;
 	unsigned short distances[32];
 	double range;
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ>), cloud_p (new pcl::PointCloud<pcl::PointXYZ>), cloud_f (new pcl::PointCloud<pcl::PointXYZ>),  cloud_filtered (new pcl::PointCloud<pcl::PointXYZ>);  // Fill in the cloud data
 
     for(int i=0; i<velodyne_message->number_of_32_laser_shots; i++) {
         h_angle = velodyne_message->partial_scan[i].angle;
 	    for(int j=0; j<32; j++) {
-            distances[j] = velodyne_message->partial_scan->distance[j];
+            distances[j] = velodyne_message->partial_scan[i].distance[j];
         }
         h_angle = M_PI * h_angle / 180.;
         
@@ -191,15 +201,63 @@ velodyne_partial_scan_message_handler(carmen_velodyne_partial_scan_message *velo
 	    }
 	}
 
-    // PointXYZ point = compute_pointxyz_from_velodyne(0, 0, 500);
-	// cloud->push_back(point);
+    // // Create the filtering object: downsample the dataset using a leaf size of 1cm
+    // pcl::VoxelGrid<pcl::PointXYZ> sor;
+    // sor.setInputCloud (cloud);
+    // sor.setLeafSize (0.1f, 0.1f, 0.1f);
+    // sor.filter (*cloud_filtered);
 
-    visualization::CloudViewer viewer ("Simple Cloud Viewer");
-    viewer.showCloud (cloud);
-    while (!viewer.wasStopped ())
-    {
-        // boost::this_thread::sleep (boost::posix_time::microseconds (100));
-    }
+    // // Convert to the templated PointCloud
+    // // pcl::fromPCLPointCloud2 (*cloud_filtered_blob, *cloud_filtered);
+
+    // pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients ());
+    // pcl::PointIndices::Ptr inliers (new pcl::PointIndices ());
+    // // Create the segmentation object
+    // pcl::SACSegmentation<pcl::PointXYZ> seg;
+    // // Optional
+    // seg.setOptimizeCoefficients (true);
+    // // Mandatory
+    // seg.setModelType (pcl::SACMODEL_PLANE);
+    // seg.setMethodType (pcl::SAC_RANSAC);
+    // seg.setMaxIterations (1000);
+    // seg.setDistanceThreshold (0.01);
+
+    // // Create the filtering object
+    // pcl::ExtractIndices<pcl::PointXYZ> extract;
+
+    // int i = 0, nr_points = (int) cloud_filtered->points.size ();
+    // // While 30% of the original cloud is still there
+    // while (cloud_filtered->points.size () > 0.3 * nr_points)
+    // {
+    //     // printf("aqui\n");
+    //     // Segment the largest planar component from the remaining cloud
+    //     seg.setInputCloud (cloud_filtered);
+    //     seg.segment (*inliers, *coefficients);
+    //     if (inliers->indices.size () == 0)
+    //     {
+    //     std::cerr << "Could not estimate a planar model for the given dataset." << std::endl;
+    //     break;
+    //     }
+
+    //     // Extract the inliers
+    //     extract.setInputCloud (cloud_filtered);
+    //     extract.setIndices (inliers);
+    //     extract.setNegative (false);
+    //     extract.filter (*cloud_p);
+    // }
+
+    // visualization::CloudViewer viewer ("Simple Cloud Viewer");
+    // viewer.showCloud (cloud_p);
+    // while (!viewer.wasStopped ())
+    // {
+    //     // boost::this_thread::sleep (boost::posix_time::microseconds (100));
+    // }
+
+    pcl::PCDWriter writer;
+    std::stringstream ss;
+    ss << "cloud_" << number << ".pcd";
+    writer.write<pcl::PointXYZ> (ss.str (), *cloud, false);
+    number++;
 }
 
 
