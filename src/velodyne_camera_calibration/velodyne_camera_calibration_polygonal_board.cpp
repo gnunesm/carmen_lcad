@@ -197,7 +197,9 @@ velodyne_partial_scan_message_handler(carmen_velodyne_partial_scan_message *velo
 	    	v_angle = M_PI * v_angle / 180.;
 
 	    	PointXYZ point = compute_pointxyz_from_velodyne(v_angle, -h_angle, range);
-	    	cloud->push_back(point);
+            if(range < 10){
+	    	    cloud->push_back(point);
+            }
 	    }
 	}
 
